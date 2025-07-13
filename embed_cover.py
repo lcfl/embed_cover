@@ -9,6 +9,17 @@ import json
 VIDEO_EXTENSIONS = ('.mp4', '.mkv', '.mov')
 THUMBNAIL_TIME_SECONDS = 20
 
+def check_ffmpeg():
+    """检查 ffmpeg 和 ffprobe 是否已安装并配置到环境变量中。"""
+    for tool in ['ffmpeg']:
+        try:
+            subprocess.run([tool, '-version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            print(f"错误：未检测到 '{tool}' 命令。请确保已正确安装 FFmpeg 并添加到系统环境变量中。")
+            print("下载地址：https://ffmpeg.org/download.html")
+            sys.exit(1)
+
+
 def has_embedded_cover(video_path: str) -> bool:
     """
     使用 ffprobe 检查视频文件是否已嵌入封面。
@@ -154,4 +165,5 @@ def main():
     print("\n--- 所有任务已完成 ---")
 
 if __name__ == "__main__":
+    check_ffmpeg()
     main()
