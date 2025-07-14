@@ -1,3 +1,4 @@
+# pyinstaller --onefile --windowed --add-data "ffmpeg.exe;." --add-data "ffprobe.exe;." --icon="icon.ico" gui.py
 import sys
 import os
 import subprocess
