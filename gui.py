@@ -14,8 +14,11 @@ from PyQt5.QtWidgets import (
     QProgressBar, QRadioButton, QButtonGroup, QSpinBox, QDoubleSpinBox,
     QListWidgetItem, QSplitter, QTabWidget, QFrame, QScrollArea
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QUrl, QRunnable, QThreadPool, QObject
-from PyQt5.QtGui import QDragEnterEvent, QDropEvent
+from PyQt5.QtCore import Qt, pyqtSignal, QUrl, QRunnable, QThreadPool, QObject
+from PyQt5.QtGui import QDragEnterEvent, QDropEvent, QIcon
+
+# --- 为 Windows 定义一个标志，用于在调用子进程时不创建控制台窗口 ---
+CREATE_NO_WINDOW = 0x08000000 if sys.platform == 'win32' else 0
 
 # --- 全局配置 ---
 CONFIG_FILE = 'config.json'
@@ -96,17 +99,24 @@ class Worker(QRunnable):
                 'ffmpeg', '-ss', str(second), '-i', video_path,
                 '-vframes', '1', '-q:v', '2', '-y', temp_cover
             ]
-            subprocess.run(ffmpeg_extract_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(ffmpeg_extract_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
             
             if not os.path.exists(temp_cover) or os.path.getsize(temp_cover) == 0:
                 return "错误：提取封面失败"
 
+            # --- 已修正的核心命令 ---
+            # 此命令通过精确映射码流来确保旧封面被移除，新封面被正确替换
             ffmpeg_embed_cmd = [
                 'ffmpeg', '-i', video_path, '-i', temp_cover,
-                '-map', '0', '-map', '1', '-c', 'copy', 
-                '-disposition:v:1', 'attached_pic', '-y', temp_output
+                '-map', '0:v:0',       # 仅映射原视频的第一个视频流（即主画面）
+                '-map', '0:a?',       # 映射所有音频流（如果存在）
+                '-map', '0:s?',       # 映射所有字幕流（如果存在）
+                '-map', '1',          # 映射新封面
+                '-c', 'copy',         # 对所有选定的流进行复制
+                '-disposition:v:1', 'attached_pic', # 将新封面（现在是第二个视频流）设置为封面
+                '-y', temp_output
             ]
-            subprocess.run(ffmpeg_embed_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(ffmpeg_embed_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=CREATE_NO_WINDOW)
             
             if out_dir:
                 final_path = os.path.join(out_dir, os.path.basename(video_path))
@@ -114,7 +124,7 @@ class Worker(QRunnable):
             else:
                 shutil.move(temp_output, video_path)
             
-            return "成功嵌入封面"
+            return "成功替换封面" if self.config.get("overwrite_existing") else "成功嵌入封面"
             
         except subprocess.CalledProcessError as e:
             return f"错误：FFmpeg 处理失败 - {e}"
@@ -132,7 +142,7 @@ class Worker(QRunnable):
         try:
             result = subprocess.run([
                 'ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', video_path
-            ], capture_output=True, text=True, check=True, encoding='utf-8')
+            ], capture_output=True, text=True, check=True, encoding='utf-8', creationflags=CREATE_NO_WINDOW)
             data = json.loads(result.stdout)
             for stream in data.get('streams', []):
                 if stream.get('codec_type') == 'video' and stream.get('disposition', {}).get('attached_pic', 0) == 1:
@@ -145,7 +155,7 @@ class Worker(QRunnable):
         try:
             result = subprocess.run([
                 'ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', video_path
-            ], capture_output=True, text=True, check=True, encoding='utf-8')
+            ], capture_output=True, text=True, check=True, encoding='utf-8', creationflags=CREATE_NO_WINDOW)
             data = json.loads(result.stdout)
             return float(data.get('format', {}).get('duration', 0))
         except (subprocess.CalledProcessError, json.JSONDecodeError, FileNotFoundError):
@@ -256,6 +266,10 @@ class MainApp(QWidget):
         self.resize(950, 768)
         self.setMinimumSize(800, 600)
         self.set_stylesheet()
+        
+        # 尝试设置窗口图标，如果 icon.ico 不存在也不会报错
+        if os.path.exists("icon.ico"):
+            self.setWindowIcon(QIcon("icon.ico"))
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(15, 15, 15, 15)
@@ -537,8 +551,8 @@ class MainApp(QWidget):
 
     def stop_processing(self):
         self.log_view.append("...正在请求停止所有任务...")
-        self.threadpool.clear() # 清除队列中未开始的任务
-        self.threadpool.waitForDone() # 等待当前活动任务自然结束（不会强制中断）
+        self.threadpool.clear() 
+        self.threadpool.waitForDone() 
         self.on_all_workers_finished()
 
 
@@ -551,15 +565,22 @@ class MainApp(QWidget):
         self.active_workers -= 1
         processed_count = self.progress_bar.maximum() - self.active_workers
         self.progress_bar.setValue(processed_count)
-        if self.active_workers == 0:
+        if self.active_workers <= 0:
             self.on_all_workers_finished()
 
     def on_all_workers_finished(self):
         """所有工作线程都完成后调用"""
+        if self.active_workers > 0:
+            return
+        
         self.log_view.append(f"--- {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 处理任务结束 ---\n")
         self.set_controls_enabled(True)
-        QMessageBox.information(self, "完成", "所有文件处理完毕！")
-        
+        if self.progress_bar.value() == self.progress_bar.maximum():
+             QMessageBox.information(self, "完成", "所有文件处理完毕！")
+        else:
+             QMessageBox.warning(self, "已停止", "处理任务已被用户停止。")
+
+
     def set_controls_enabled(self, enabled):
         self.start_btn.setEnabled(enabled)
         self.stop_btn.setEnabled(not enabled)
@@ -580,7 +601,7 @@ class MainApp(QWidget):
 
     def check_ffmpeg(self):
         try:
-            subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+            subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True, creationflags=CREATE_NO_WINDOW)
             QMessageBox.information(self, "成功", "FFmpeg 环境配置正确！")
         except (FileNotFoundError, subprocess.CalledProcessError):
             QMessageBox.critical(self, "失败", "未找到 FFmpeg！\n请确保已正确安装并将其添加至系统环境变量 (PATH)。")
